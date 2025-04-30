@@ -4,8 +4,17 @@ phases:
   install:
     runtime-versions:
       python: 3.11
+    commands:
+      - echo "Installing dependencies (if any)"
+      - pip install -r lf1/requirements.txt -t lf1/ || true
+      - pip install -r lf2/requirements.txt -t lf2/ || true
+
   build:
     commands:
+      - echo "Zipping lf1 and lf2 code"
+      - cd lf1 && zip -r ../lf1.zip . && cd ..
+      - cd lf2 && zip -r ../lf2.zip . && cd ..
+
       - echo "Deploying lf1.zip to LF1-pipeline"
       - aws lambda update-function-code --function-name LF1-pipeline --zip-file fileb://lf1.zip
 

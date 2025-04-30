@@ -4,13 +4,14 @@ phases:
   install:
     runtime-versions:
       python: 3.11
-    commands:
-      - pip install -r lf1/requirements.txt -t lf1/
-      - pip install -r lf2/requirements.txt -t lf2/
   build:
     commands:
-      - cd lf1 && zip -r ../lf1.zip . && cd ..
-      - cd lf2 && zip -r ../lf2.zip . && cd ..
+      - echo "Deploying lf1.zip to LF1-pipeline"
+      - aws lambda update-function-code --function-name LF1-pipeline --zip-file fileb://lf1.zip
+
+      - echo "Deploying lf2.zip to LF2-pipeline"
+      - aws lambda update-function-code --function-name LF2-pipeline --zip-file fileb://lf2.zip
+
 artifacts:
   files:
     - lf1.zip

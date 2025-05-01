@@ -1,93 +1,73 @@
 import json
 import boto3
-import json
-import traceback
-import requests
+import base64
 import os
-import urllib.parse
+import requests
+import datetime
 
-rekognition_client = boto3.client('rekognition')
 s3_client = boto3.client('s3')
-
-def get_custom_labels(bucket, key):
-    try:
-        response = s3_client.head_object(Bucket=bucket, Key=key)
-        print("s3 head object response:", response)
-        
-        if 'customlabels' in response['Metadata']:
-            custom_labels = [label.strip().lower() for label in response['Metadata']['customlabels'].split(',')]
-            print(f"Custom labels found: {custom_labels}")
-            return custom_labels
-        
-        print("No custom labels found in metadata")
-        return []
-        
-    except Exception as e:
-        print(f"Error retrieving custom labels: {str(e)}")
-        return []
-        
-def ingest_photo_to_es(object_key, bucket, timestamp, labels):
-
-    es_host = os.environ['OS_URL']
-    index_name = 'photos'
-    url = f"{es_host}/{index_name}/_doc"
-    print(f"Hitting ES url {url}")
-    username = os.environ['OS_USERNAME']
-    password = os.environ['OS_PASSWORD']
-    headers = {
-      'Content-Type': 'application/json'
-    }
-    
-    photo_data = {
-        "objectKey": object_key,
-        "bucket": bucket,
-        "createdTimestamp": timestamp,
-        "labels": labels
-    }
-
-    ingestion_response = requests.post(url, auth=(username, password), data=json.dumps(photo_data), headers=headers)
-    print("ES Index Response Log: ", json.dumps(ingestion_response.text))
-
+rekognition_client = boto3.client('rekognition')
 
 def lambda_handler(event, context):
+    print("Event received:", json.dumps(event))
     
-    print("request log: ", json.dumps(event))
+    # Extract path param for image key
+    object_key = event["pathParameters"]["object"]
+    print("Uploading object key:", object_key)
+    
+    # Decode base64 image content
+    image_data = base64.b64decode(event["body"])
+    
+    # Optional custom labels
+    custom_labels = []
+    if "headers" in event and "x-amz-meta-customlabels" in event["headers"]:
+        custom_labels = [label.strip().lower() for label in event["headers"]["x-amz-meta-customlabels"].split(",")]
+    print("Custom labels from header:", custom_labels)
 
-    for record in event['Records']:
-        bucket_name = record['s3']['bucket']['name']
-        object_key = urllib.parse.unquote_plus(record['s3']['object']['key'])
-        timestamp = record['eventTime']
-        print("Obj timestamp --->", timestamp)
-        
-        try:
-            custom_labels = get_custom_labels(bucket_name, object_key)
+    # Upload to S3
+    bucket = "photo-album-frontend-2025"
+    s3_client.put_object(
+        Bucket=bucket,
+        Key=object_key,
+        Body=image_data,
+        ContentType="image/png",
+        Metadata={"customlabels": ",".join(custom_labels)}
+    )
+    print(f"Uploaded {object_key} to {bucket}")
 
-            response = rekognition_client.detect_labels(
-                Image={
-                    'S3Object': {
-                        'Bucket': bucket_name,
-                        'Name': object_key
-                    }
-                },
-                MaxLabels=10 
-            )
-            
-            print(f"Rekognition labels for {object_key}:")
-            image_label_names = [label['Name'].lower() for label in response['Labels']]
-            print(f"Image labels parsed --->", image_label_names )
+    # Run Rekognition on uploaded image
+    rekognition_response = rekognition_client.detect_labels(
+        Image={"S3Object": {"Bucket": bucket, "Name": object_key}},
+        MaxLabels=10
+    )
+    
+    rekognition_labels = [label["Name"].lower() for label in rekognition_response["Labels"]]
+    print("Rekognition labels:", rekognition_labels)
 
-            all_labels = list(set(image_label_names + custom_labels))
-            print(f"Combined labels: {all_labels}")
-            
-            ingest_photo_to_es(object_key, bucket_name, timestamp, all_labels )
-            
-        
-        except Exception as e:
-            print(f"Error processing {object_key} from {bucket_name}: {traceback.format_exc()}")
-            raise
+    # Combine custom and Rekognition labels
+    combined_labels = list(set(rekognition_labels + custom_labels))
+    print("All combined labels:", combined_labels)
 
+    # Build document for OpenSearch
+    doc = {
+        "objectKey": object_key,
+        "bucket": bucket,
+        "createdTimestamp": datetime.datetime.utcnow().isoformat(),
+        "labels": combined_labels
+    }
+
+    # Index into OpenSearch
+    es_url = os.environ["OS_URL"]
+    es_username = os.environ["OS_USERNAME"]
+    es_password = os.environ["OS_PASSWORD"]
+    index_url = f"{es_url}/photos/_doc"
+
+    headers = {"Content-Type": "application/json"}
+    es_response = requests.post(index_url, auth=(es_username, es_password), json=doc, headers=headers)
+    
+    print("OpenSearch index response:", es_response.status_code, es_response.text)
 
     return {
-        'statusCode': 200,
-        'message': 'success'
+        "statusCode": 200,
+        "body": json.dumps({"message": f"Successfully uploaded and indexed {object_key}"})
     }
